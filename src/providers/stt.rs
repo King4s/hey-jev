@@ -86,6 +86,13 @@ impl SttProvider for OpenAiCompatibleStt {
 ///
 /// The distinction from `openai_compatible` is the protocol, not the vendor — any chat model that
 /// accepts audio parts is reachable this way.
+///
+/// **Measured 2026-10-09:** a half-second 440 Hz tone with no speech in it came back as HTTP 200
+/// and a confident invented lecture transcript. The status code is therefore not evidence that
+/// anything was heard, and whatever is built on top of this must treat an empty room as a case to
+/// detect rather than a case to trust — the local `command` transcriber, which runs whisper with
+/// voice-activity filtering, does not fail this way. Do not paste this output anywhere without a
+/// non-speech check in front of it.
 pub struct ChatCompletionsStt {
     client: reqwest::blocking::Client,
     base_url: String,
