@@ -12,3 +12,7 @@ build/
 dist/
 .eggs/
 assets/icon.iconset/
+/target
+cache/
+*.part
+__pycache__/

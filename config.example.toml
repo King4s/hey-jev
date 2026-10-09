@@ -1,0 +1,465 @@
+# hey-jev configuration
+#
+# Every setting the assistant has is in this file. There are no hidden ones: if you want to
+# change what it does, what it says, which model decides, which voice speaks, or where it puts
+# its files, this is the whole list.
+#
+# Keys are validated strictly — a mistyped key is an error at startup, not a setting that
+# silently does nothing.
+#
+# Write this file with `hey-jev --init`. Check it with `hey-jev --check`.
+
+[general]
+# "ptt"  = hold a key and speak, "wake" = always listening for the wake word.
+mode = "ptt"
+# Which driver touches the machine: "macos", "linux", "recording", or "auto" for this host.
+platform = "auto"
+# Confidence below which an answer is not acted on. Raise it and the assistant asks again more
+# often; lower it and it acts on weaker readings.
+gate = 0.65
+# Log, audio cache and any saved clips live here.
+state_dir = "~/.local/state/hey-jev"
+# Request timeout for every provider call.
+timeout_secs = 30
+# Actions that must be announced BEFORE they run, because they take the sound or the screen
+# away and the reply would be lost. Setting a volume to the quietest level counts as well.
+speak_before = ["volume_mute", "system_lock", "system_sleep"]
+
+[general.volume]
+# How far one "turn it up" moves the volume.
+step = 20
+
+# What each named level means. The names must match the levels of the volume_level score
+# question below, or "set the volume to quiet" has nothing to set.
+[general.volume.levels]
+silent = 0
+quiet = 25
+medium = 50
+loud = 75
+max = 100
+
+# --------------------------------------------------------------------------- intent
+#
+# The intent provider turns one sentence into typed answers. "typesafe" calls TypeSafe's System
+# One endpoint, which returns calibrated probabilities. "openai_compatible" asks any chat model
+# for the same shape and verifies it — it works with OpenRouter, OpenAI, a local LM Studio, or
+# the fleet's own gateway, because they all speak /chat/completions.
+
+[intent]
+provider = "typesafe"
+model = "jev-latest"
+base_url = "https://api.typesafe.ai/v1/systemone"
+key_env = "TYPESAFE_API_KEY"
+# Which question names the request kind, whether it holds two actions, and what is being
+# controlled. These wire the decision logic to the questions below.
+category_question = "category"
+compound_question = "compound"
+target_question = "target"
+# Which option of the category question means what. "information_request" is answered by the
+# language model, "chit_chat" with a scripted line, "unclear" by asking again.
+category_information = "information_request"
+category_chit_chat = "chit_chat"
+category_unclear = "unclear"
+# A timer question ("how long is left?") reads exactly like a factual question, so this target
+# is resolved before the category is consulted. Empty means no such rule.
+timer_target = "timer"
+# Below this, the named target is ignored and the most confident action anywhere wins.
+target_gate = 0.5
+# The option value meaning "nothing here".
+none_option = "none"
+# For the cost line in the log. Zero means do not estimate.
+input_price_per_million = 0.042
+# The questions that are asked again, scoped to the first and the second action, when a request
+# holds two. Everything in `questions` except the two above is scoped automatically.
+split_slots = [
+  "target", "app", "app_action", "browser_action", "volume_action", "volume_scope",
+  "volume_level", "display_action", "media_action", "system_action", "timer_action",
+]
+
+# Which reply ids the decision logic itself uses. Sub-tables must follow every plain key of
+# their parent table, which is why this sits here and not with the keys above.
+[intent.special_replies]
+information = "info"
+chit_chat = "chit_chat"
+clarify = "clarify"
+give_up = "give_up"
+unsupported = "unsupported"
+compound_done = "compound_done"
+timer_done = "timer_done"
+reminder_done = "reminder_done"
+timer_unclear = "timer_unclear"
+no_timer = "timer_none"
+timers_cancel_all = "timers_cancel"
+
+# --- targets ---------------------------------------------------------------------------
+# How an answer about each controllable thing becomes an action. The action id is built as
+# `<prefix>_<option>`, which is the same name the reply table uses — so "app" + "open" is the
+# action `app_open` and the reply `app_open`. The keys here must be the options of the `target`
+# question below.
+
+[intent.targets.app]
+action_question = "app_action"
+arg_question = "app"
+
+[intent.targets.browser]
+action_question = "browser_action"
+arg_question = "app"
+# The argument must be one of the configured browsers; a named app that is not a browser means
+# "no browser was named", not "the browser is called that".
+arg_from_browsers = true
+
+[intent.targets.volume]
+action_question = "volume_action"
+arg_question = "volume_level"
+# "turn Spotify down" is Spotify's own volume; an unqualified "turn it down" is the system's.
+scope_question = "volume_scope"
+scope_option = "spotify"
+scope_prefix = "spotify_volume"
+# Naming the subject settles it on its own, even when the scope question is unsure.
+scope_subject_question = "app"
+
+[intent.targets.display]
+action_question = "display_action"
+
+[intent.targets.media]
+action_question = "media_action"
+
+[intent.targets.system]
+action_question = "system_action"
+
+[intent.targets.timer]
+action_question = "timer_action"
+
+# --- questions -------------------------------------------------------------------------
+# One fan-out call answers all of these at once. Ask for everything you might need: extra
+# questions cost tokens, not time, and the ones the chosen branch does not use are ignored.
+
+[intent.questions.category]
+type = "choice"
+instructions = "What kind of request is this?"
+[intent.questions.category.criteria]
+mac_command = "asks the computer to do something"
+information_request = "asks a general knowledge or factual question"
+chit_chat = "just talking, greeting, or thanking"
+unclear = "garbled, empty, or makes no sense"
+
+[intent.questions.compound]
+type = "noul"
+instructions = "Does the request contain more than one distinct action?"
+
+[intent.questions.target]
+type = "choice"
+instructions = "What is the primary thing being controlled?"
+[intent.questions.target.criteria]
+app = "an application"
+volume = "sound level"
+display = "screen appearance or dark mode"
+media = "music playback"
+system = "locking or sleeping the computer"
+browser = "opening a website or a new browser tab"
+timer = "setting, checking, or cancelling a timer or reminder"
+
+[intent.questions.app]
+type = "choice"
+instructions = "Which app, if any, is named?"
+# The options are the keys of the app list, so the two cannot drift apart.
+include_apps = true
+include_none = true
+
+[intent.questions.app_action]
+type = "choice"
+instructions = "What should happen to the app? Every name in the app list is an application, so open or close with one of those names is about the app itself."
+[intent.questions.app_action.criteria]
+open = "open, launch, or start the app itself"
+quit = "quit, close, or kill the app"
+hide = "hide the app"
+minimise = "minimise the app's windows"
+focus = "switch to, show, or bring the app to the front"
+none = "the request is about playback, volume, a website, a tab, or something inside the app"
+
+[intent.questions.browser_action]
+type = "choice"
+instructions = "What should happen in the web browser, if anything?"
+[intent.questions.browser_action.criteria]
+new_tab = "open a new empty tab"
+open_site = "go to or open a specific website"
+none = ""
+
+[intent.questions.volume_action]
+type = "choice"
+instructions = "What should happen to the volume, if anything?"
+[intent.questions.volume_action.criteria]
+up = ""
+down = ""
+mute = ""
+unmute = ""
+set = "set to a specific level"
+none = ""
+
+[intent.questions.volume_scope]
+type = "choice"
+instructions = "Which volume should change?"
+[intent.questions.volume_scope.criteria]
+spotify = "Spotify's own in-app volume, when Spotify is explicitly named"
+system = "the sound output as a whole, including unqualified volume requests"
+
+[intent.questions.volume_level]
+type = "score"
+instructions = "If a volume level is asked for, how loud?"
+levels = ["silent", "quiet", "medium", "loud", "max"]
+
+[intent.questions.display_action]
+type = "choice"
+instructions = "What should happen to dark mode?"
+[intent.questions.display_action.criteria]
+dark_on = ""
+dark_off = ""
+toggle = ""
+none = ""
+
+[intent.questions.media_action]
+type = "choice"
+instructions = "What should happen to music playback?"
+[intent.questions.media_action.criteria]
+play = ""
+pause = ""
+next = ""
+previous = ""
+none = ""
+
+[intent.questions.system_action]
+type = "choice"
+instructions = "What should happen to the computer?"
+[intent.questions.system_action.criteria]
+lock = ""
+sleep = ""
+none = ""
+
+[intent.questions.timer_action]
+type = "choice"
+instructions = "What should happen with a timer or reminder?"
+[intent.questions.timer_action.criteria]
+set = "start a timer or set a reminder"
+check = "ask how much time is left"
+cancel = "stop or cancel a timer"
+none = ""
+
+# --------------------------------------------------------------------------- timers
+#
+# The number vocabulary a spoken duration is built from. "twenty five minutes" and "half an
+# hour" are parsed with these, so the list is a language setting rather than a constant.
+
+[timers]
+# The word that introduces what a reminder is about. A plain key of [timers] must come before
+# any of its sub-tables below, or it lands inside the last one opened.
+to_word = "to"
+
+[timers.numbers]
+a = 1
+an = 1
+one = 1
+two = 2
+three = 3
+four = 4
+five = 5
+six = 6
+seven = 7
+eight = 8
+nine = 9
+ten = 10
+eleven = 11
+twelve = 12
+thirteen = 13
+fourteen = 14
+fifteen = 15
+sixteen = 16
+seventeen = 17
+eighteen = 18
+nineteen = 19
+twenty = 20
+thirty = 30
+forty = 40
+fifty = 50
+sixty = 60
+ninety = 90
+couple = 2
+few = 3
+
+[timers.units]
+s = 1
+sec = 1
+secs = 1
+second = 1
+seconds = 1
+m = 60
+min = 60
+mins = 60
+minute = 60
+minutes = 60
+h = 3600
+hr = 3600
+hrs = 3600
+hour = 3600
+hours = 3600
+
+# How each unit is said out loud. A list, not a table keyed by seconds: TOML keys are always
+# strings, so an integer-keyed map cannot round-trip.
+[[timers.spoken]]
+seconds = 1
+one = "second"
+many = "seconds"
+
+[[timers.spoken]]
+seconds = 60
+one = "minute"
+many = "minutes"
+
+[[timers.spoken]]
+seconds = 3600
+one = "hour"
+many = "hours"
+
+# --------------------------------------------------------------------------- llm
+#
+# Used for the one thing a scripted reply cannot cover: the user asked a question.
+
+[llm]
+provider = "openai_compatible"
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-haiku-4.5"
+key_env = "OPENROUTER_API_KEY"
+max_tokens = 80
+system_prompt = "You are a voice assistant. Answer in one short spoken sentence, no markdown. You may start with exactly one tag from: [chuckling] [laughing] [sighing] [cheerful], or none."
+
+# --------------------------------------------------------------------------- tts
+#
+# "fish" and "openai_compatible" are HTTP services; "command" runs any local synthesizer;
+# "none" makes it silent, which is what a headless run wants.
+
+[tts]
+provider = "fish"
+base_url = "https://api.fish.audio/v1"
+key_env = "FISH_AUDIO_API_KEY"
+# The voice. Find ids at https://fish.audio — open a voice and read the id from its page link.
+voice = "9a9cf47702da476aa4629e2506d4a857"
+model = "s2.1-pro-free"
+format = "wav"
+# Rendered lines are cached here under a hash of the provider, the voice and the text.
+cache_dir = "cache/tts"
+# For provider = "command": {file} is where the audio must be written, {text} is the line.
+# The line is also written to the command's stdin. For example, macOS `say`:
+#   command = ["say", "-o", "{file}", "--data-format=LEF32@22050", "{text}"]
+command = []
+
+# --------------------------------------------------------------------------- stt
+#
+# "command" keeps audio on the machine (whisper.cpp and friends). "openai_compatible" uploads
+# it, which is the one feature that sends your voice off the machine.
+
+[stt]
+provider = "command"
+language = "en"
+# {file} is the audio file, {language} the value above. whisper.cpp:
+#   command = ["whisper-cli", "-m", "models/ggml-small.en.bin", "-f", "{file}", "-l", "{language}", "-nt", "-np"]
+command = []
+model = "small.en"
+prompt = ""
+
+# --------------------------------------------------------------------------- keys
+#
+# Values are never stored here. This section names where to look: the environment first, then
+# any .env file listed, then the OS keychain.
+
+[keys]
+dotenv_files = [".env"]
+keychain_service = "com.jevsiri.keys"
+
+# --------------------------------------------------------------------------- apps
+
+[apps]
+file = "apps.json"
+# Used for "open a new tab" when no browser is named and none is in front.
+default_browser = "chrome"
+# Which app keys are browsers.
+browsers = ["chrome", "brave", "safari"]
+
+# --------------------------------------------------------------------------- wake
+
+[wake]
+# The wake-word alternatives, joined with | into one pattern. Speech recognition mishears names,
+# so the alternatives are configuration rather than an accident of the regular expression.
+names = "jev|jevs|jeff|jeffs|jef|jeb|jab|chev|jeve|jav"
+# Words that may precede the name. A bare name only counts at the start of a phrase.
+greetings = "hey|hi|hay|okay|ok"
+# How long it stays armed after a bare wake word.
+window_secs = 10.0
+# Played when the wake word is heard. Empty means silent.
+chime = ["afplay", "/System/Library/Sounds/Tink.aiff"]
+# The phrases that start and stop dictation. Empty disables that phrase.
+dictation_start = "(?:start )?(?:transcrib\\w*|dictat\\w*|take notes)"
+dictation_stop = "(?:stop|end|finish)(?: the)? ?(?:transcri|dictat)\\w*"
+
+# --------------------------------------------------------------------------- web
+
+[web]
+# Top-level domains that end a spoken address. A closed list, because otherwise "open the BBC"
+# is read as the host `bbc`.
+tlds = ["com", "co.uk", "org", "net", "io", "ai", "dev", "tv", "app", "me", "uk", "gov", "edu"]
+# The word spoken for a dot: "open youtube dot com".
+dot_word = "dot"
+# Used when the pattern cannot find an address ("open the BBC"). Empty disables the fallback.
+prompt = "Reply with only the full https URL of the website the user wants to open, or NONE."
+
+# --------------------------------------------------------------------------- replies
+#
+# What it says. Each id holds one or more lines and one is picked at random. {app} and {level}
+# are filled in with the app or the level the action was about. There is no built-in set: the
+# voice is content, not code.
+#
+# The ids are the action names (`<target>_<option>`, see intent.targets) plus the ones the
+# decision logic produces: chit_chat, info, clarify, give_up, unsupported, compound_done, wake.
+
+[replies]
+app_open = ["[chuckling] There you go.", "Opening it up.", "[cheerful] Here you go."]
+app_quit = ["{app}'s gone.", "[sighing] Closing {app}. Good riddance.", "Done, {app} is closed."]
+app_hide = ["{app}'s hidden.", "[chuckling] Out of sight, {app}."]
+app_minimise = ["Minimised {app}.", "{app}'s tucked away."]
+app_focus = ["Here's {app}.", "[cheerful] Switching to {app}."]
+browser_new_tab = ["New tab's open.", "[cheerful] Fresh tab for you."]
+browser_open_site = ["Opening {site}.", "[cheerful] Here's {site}."]
+browser_no_site = ["[clear throat] Which website?"]
+volume_up = ["Louder it is.", "[cheerful] Turning it up.", "Up we go."]
+volume_down = ["Bringing it down.", "[sighing] A little quieter.", "Turning it down."]
+volume_mute = ["[sighing] Muting. Finally some quiet.", "Muted.", "Shh. Muted."]
+volume_unmute = ["Sound's back.", "[cheerful] Unmuted.", "And we're back."]
+volume_set = ["Set to {level}.", "Volume's {level} now."]
+spotify_volume_up = ["Turning Spotify up.", "[cheerful] Spotify's louder."]
+spotify_volume_down = ["Turning Spotify down.", "Spotify's a little quieter."]
+spotify_volume_mute = ["Spotify's muted.", "[sighing] Muting Spotify."]
+spotify_volume_unmute = ["Spotify's sound is back.", "[cheerful] Spotify's unmuted."]
+spotify_volume_set = ["Spotify's set to {level}.", "Set Spotify to {level}."]
+display_dark_on = ["[chuckling] Lights off.", "Dark mode on.", "Going dark."]
+display_dark_off = ["[cheerful] Let there be light.", "Dark mode off.", "Back to light."]
+display_toggle = ["Flipped it.", "There, switched."]
+media_play = ["[cheerful] Playing.", "Putting the music on.", "Here we go."]
+media_pause = ["Paused.", "[sighing] Pausing. Take your time.", "Holding it there."]
+media_next = ["Skipping.", "[chuckling] Not a fan? Next one.", "Next track."]
+media_previous = ["Going back one.", "Previous track.", "[chuckling] Again? Sure."]
+system_lock = ["Locking up. See you soon.", "Locked.", "Screen's locked."]
+system_sleep = ["Good night.", "Sleeping now.", "[sighing] Finally, a nap."]
+info = ["[chuckling] That's a question, not a command. I'll get a brain for that soon.", "[sighing] I can't answer that one yet."]
+chit_chat = ["[chuckling] Hi. Give me something to do.", "[cheerful] Hey. I'm listening."]
+compound_done = ["[chuckling] Done, both of them.", "[cheerful] All done.", "Both sorted."]
+wake = ["Yes?", "[cheerful] Mm-hm?", "I'm listening."]
+clarify = ["[clear throat] Sorry, say that again?", "Hm, one more time?"]
+give_up = ["[sighing] I'm not sure what you mean. Try saying it differently?"]
+unsupported = ["[chuckling] I know what you want, I just can't do that one yet."]
+timer_set = ["[cheerful] Timer's set.", "On it. I'll let you know.", "Done, counting down."]
+reminder_set = ["Got it, I'll remind you.", "[cheerful] Sure, I'll give you a shout."]
+timer_check = ["{left} left.", "You've got {left} to go."]
+timer_cancel = ["Timer cancelled.", "[sighing] Fine, no timer then."]
+timers_cancel = ["All timers cancelled.", "Cleared them all."]
+timer_none = ["[chuckling] There's no timer running."]
+timer_unclear = ["[clear throat] How long for?"]
+timer_done = ["[cheerful] Time's up!", "[chuckling] Ding ding, time's up."]
+reminder_done = ["[cheerful] Hey, just a reminder: {label}.", "Reminder: {label}."]
