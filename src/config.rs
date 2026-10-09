@@ -323,6 +323,14 @@ pub struct Llm {
     pub max_tokens: u32,
     /// The system prompt. No default: how the assistant is told to speak is a choice.
     pub system_prompt: String,
+    /// Provider plugins, passed through verbatim in the request.
+    ///
+    /// On OpenRouter this is how a router is tuned — `[{ id = "jev-router", cost_tier = "medium" }]`
+    /// — and the tiers are the router's main knob, so hardcoding them would be the same mistake
+    /// as hardcoding a model name. Passed through rather than modelled here because the field is
+    /// provider-specific and this crate has no business knowing its schema.
+    #[serde(default)]
+    pub plugins: Vec<serde_json::Value>,
 }
 
 fn default_max_tokens() -> u32 {

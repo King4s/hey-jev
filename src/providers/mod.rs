@@ -23,7 +23,7 @@ use crate::secrets::Secrets;
 
 pub use intent::{Decisions, OpenAiCompatibleIntent};
 pub use llm::OpenAiCompatibleLlm;
-pub use stt::{CommandStt, OpenAiCompatibleStt};
+pub use stt::{ChatCompletionsStt, CommandStt, OpenAiCompatibleStt};
 pub use tts::{CommandTts, FishTts, SilentTts, SpeechTts};
 
 /// Decides what a sentence means.
@@ -116,6 +116,7 @@ pub fn build_llm(config: &Config, secrets: &mut Secrets) -> Result<Option<Box<dy
             llm.model.clone(),
             llm.max_tokens,
             llm.system_prompt.clone(),
+            llm.plugins.clone(),
         )))),
         other => bail!("unknown llm.provider `{other}` — known providers: openai_compatible"),
     }
@@ -173,13 +174,22 @@ pub fn build_stt(config: &Config, secrets: &mut Secrets) -> Result<Option<Box<dy
             stt.language.clone(),
             stt.prompt.clone(),
         )))),
+        // Audio in a chat message, for a router or chat model that accepts audio parts.
+        "chat_completions" => Ok(Some(Box::new(ChatCompletionsStt::new(
+            client,
+            stt.base_url.clone(),
+            secrets_maybe(secrets, &stt.key_env),
+            stt.model.clone(),
+            stt.language.clone(),
+            stt.prompt.clone(),
+        )))),
         "command" => Ok(Some(Box::new(CommandStt::new(
             stt.command.clone(),
             stt.language.clone(),
         )))),
         "none" => Ok(None),
         other => bail!(
-            "unknown stt.provider `{other}` — known providers: openai_compatible, command, none"
+            "unknown stt.provider `{other}` — known providers: openai_compatible, chat_completions, command, none"
         ),
     }
 }

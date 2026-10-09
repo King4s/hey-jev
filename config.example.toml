@@ -342,12 +342,20 @@ many = "hours"
 # Used for the one thing a scripted reply cannot cover: the user asked a question.
 
 [llm]
+# typesafe/jev-router picks the model and reasoning effort for each request instead of committing
+# to one, so the assistant keeps up as the question changes. The response's `model` field reports
+# what actually served the call.
 provider = "openai_compatible"
 base_url = "https://openrouter.ai/api/v1"
-model = "anthropic/claude-haiku-4.5"
+model = "typesafe/jev-router"
 key_env = "OPENROUTER_API_KEY"
 max_tokens = 80
 system_prompt = "You are a voice assistant. Answer in one short spoken sentence, no markdown. You may start with exactly one tag from: [chuckling] [laughing] [sighing] [cheerful], or none."
+# Provider plugins, passed through verbatim. On OpenRouter this tunes the router, and the tiers
+# are the router's main knob — hardcoding one would be the same mistake as hardcoding a model:
+#   plugins = [{ id = "jev-router", cost_tier = "medium" }]
+# low / medium / high. Optional: leaving it empty lets the router use its own policy.
+plugins = []
 
 # --------------------------------------------------------------------------- tts
 #
@@ -371,17 +379,30 @@ command = []
 
 # --------------------------------------------------------------------------- stt
 #
-# "command" keeps audio on the machine (whisper.cpp and friends). "openai_compatible" uploads
-# it, which is the one feature that sends your voice off the machine.
+# Three ways to turn speech into text:
+#
+#   "chat_completions"   the audio rides inside a chat message, which is how a router that
+#                        accepts audio is called — typesafe/jev-router takes audio in and
+#                        gives text out, but it is a chat model, not an /audio/transcriptions one
+#   "openai_compatible"  POST /audio/transcriptions: OpenAI, Groq, or OpenRouter's own path
+#   "command"            a local transcriber such as whisper.cpp, which keeps audio on the machine
+#
+# Both HTTP options send your voice off the machine. That is the one feature that does. If you
+# would rather it did not, use "command".
 
 [stt]
-provider = "command"
+provider = "chat_completions"
+base_url = "https://openrouter.ai/api/v1"
+model = "typesafe/jev-router"
+key_env = "OPENROUTER_API_KEY"
 language = "en"
-# {file} is the audio file, {language} the value above. whisper.cpp:
+# The instruction sent alongside the audio. Empty means a built-in transcription instruction that
+# names the language above.
+prompt = ""
+# Only used by provider = "command": {file} is the audio file, {language} the value above.
+# whisper.cpp:
 #   command = ["whisper-cli", "-m", "models/ggml-small.en.bin", "-f", "{file}", "-l", "{language}", "-nt", "-np"]
 command = []
-model = "small.en"
-prompt = ""
 
 # --------------------------------------------------------------------------- keys
 #

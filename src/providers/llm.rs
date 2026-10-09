@@ -16,6 +16,7 @@ pub struct OpenAiCompatibleLlm {
     model: String,
     max_tokens: u32,
     system_prompt: String,
+    plugins: Vec<serde_json::Value>,
 }
 
 impl OpenAiCompatibleLlm {
@@ -26,8 +27,17 @@ impl OpenAiCompatibleLlm {
         model: String,
         max_tokens: u32,
         system_prompt: String,
+        plugins: Vec<serde_json::Value>,
     ) -> Self {
-        Self { client, base_url: base_url.trim_end_matches('/').to_string(), key, model, max_tokens, system_prompt }
+        Self {
+            client,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            key,
+            model,
+            max_tokens,
+            system_prompt,
+            plugins,
+        }
     }
 }
 
@@ -37,7 +47,7 @@ impl LlmProvider for OpenAiCompatibleLlm {
     }
 
     fn answer(&self, text: &str) -> Result<String> {
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "max_tokens": self.max_tokens,
             "messages": [
@@ -45,6 +55,9 @@ impl LlmProvider for OpenAiCompatibleLlm {
                 {"role": "user", "content": text},
             ],
         });
+        if !self.plugins.is_empty() {
+            body["plugins"] = json!(self.plugins);
+        }
         let request = self
             .client
             .post(format!("{}/chat/completions", self.base_url))

@@ -77,6 +77,103 @@ impl SttProvider for OpenAiCompatibleStt {
     }
 }
 
+/// Audio sent inside a chat message, which is how a router that accepts audio is called.
+///
+/// OpenRouter's `typesafe/jev-router` takes audio as an input and returns text, but it is a chat
+/// model: it is not reachable through the `/audio/transcriptions` surface that
+/// `openai_compatible` uses. This posts the audio as an `input_audio` content part and reads the
+/// transcript out of the reply.
+///
+/// The distinction from `openai_compatible` is the protocol, not the vendor — any chat model that
+/// accepts audio parts is reachable this way.
+pub struct ChatCompletionsStt {
+    client: reqwest::blocking::Client,
+    base_url: String,
+    key: Option<String>,
+    model: String,
+    language: String,
+    prompt: Option<String>,
+}
+
+impl ChatCompletionsStt {
+    pub fn new(
+        client: reqwest::blocking::Client,
+        base_url: String,
+        key: Option<String>,
+        model: String,
+        language: String,
+        prompt: Option<String>,
+    ) -> Self {
+        Self { client, base_url: base_url.trim_end_matches('/').to_string(), key, model, language, prompt }
+    }
+
+    /// What the model is told to do with the audio.
+    fn instruction(&self) -> String {
+        match &self.prompt {
+            Some(prompt) if !prompt.is_empty() => prompt.clone(),
+            _ => {
+                let language = if self.language.is_empty() {
+                    String::new()
+                } else {
+                    format!("The audio is in {}. ", self.language)
+                };
+                format!(
+                    "{language}Transcribe this audio word for word. Reply with the transcript \
+                     only, with no commentary and no quotation marks."
+                )
+            }
+        }
+    }
+}
+
+impl SttProvider for ChatCompletionsStt {
+    fn name(&self) -> String {
+        format!("chat_completions:{}", self.model)
+    }
+
+    fn transcribe(&self, audio: &[u8], _filename: &str) -> Result<String> {
+        if self.model.trim().is_empty() {
+            bail!("stt.model is required by this provider but is empty in the config");
+        }
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD.encode(audio);
+        let body = chat_audio_body(&self.model, &self.instruction(), &data);
+        let request = self
+            .client
+            .post(format!("{}/chat/completions", self.base_url))
+            .json(&body);
+        let response = with_auth(request, &self.key)
+            .send()
+            .context("calling the transcription model")?;
+        let response = check_status(response, "the transcription model")?;
+        let payload: serde_json::Value =
+            response.json().context("decoding the transcript")?;
+        let text = payload["choices"][0]["message"]["content"]
+            .as_str()
+            .context("the transcription model returned no message content")?
+            .trim()
+            .to_string();
+        Ok(text)
+    }
+}
+
+/// The request body for audio riding inside a chat message.
+///
+/// Separate and pure so the shape can be checked without a network call: this is the part that is
+/// easy to get subtly wrong, and a wrong content part is rejected or, worse, ignored.
+pub fn chat_audio_body(model: &str, instruction: &str, audio_base64: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": instruction},
+                {"type": "input_audio", "input_audio": {"data": audio_base64, "format": "wav"}},
+            ],
+        }],
+    })
+}
+
 /// A local transcriber driven by argv: `{file}` is the audio file, `{model}` and `{language}`
 /// the configured values. The transcript is read from stdout.
 ///
@@ -141,5 +238,52 @@ impl SttProvider for CommandStt {
             .collect::<Vec<_>>()
             .join(" ");
         Ok(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The audio must go over as an `input_audio` content part next to a text instruction, not as
+    /// a bare message body — a router that accepts audio reads it from the content array.
+    #[test]
+    fn audio_is_sent_as_a_chat_content_part() {
+        let body = chat_audio_body("typesafe/jev-router", "Transcribe this.", "QUJD");
+        assert_eq!(body["model"], "typesafe/jev-router");
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Transcribe this.");
+        assert_eq!(content[1]["type"], "input_audio");
+        assert_eq!(content[1]["input_audio"]["data"], "QUJD");
+        assert_eq!(content[1]["input_audio"]["format"], "wav");
+    }
+
+    /// With no configured prompt the built-in instruction must carry the language, or a
+    /// non-English recording is transcribed into the wrong one.
+    #[test]
+    fn the_default_instruction_names_the_language() {
+        let provider = ChatCompletionsStt::new(
+            reqwest::blocking::Client::new(),
+            "https://example.invalid".into(),
+            None,
+            "m".into(),
+            "da".into(),
+            None,
+        );
+        let instruction = provider.instruction();
+        assert!(instruction.contains("da"), "got {instruction:?}");
+        assert!(instruction.to_lowercase().contains("transcribe"));
+
+        // A configured prompt is used verbatim instead.
+        let configured = ChatCompletionsStt::new(
+            reqwest::blocking::Client::new(),
+            "https://example.invalid".into(),
+            None,
+            "m".into(),
+            "da".into(),
+            Some("Write it down.".into()),
+        );
+        assert_eq!(configured.instruction(), "Write it down.");
     }
 }
