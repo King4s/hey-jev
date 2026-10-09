@@ -143,15 +143,17 @@ keeps asking Spotify to play because Spotify ignores play while it is loading, a
 
 ## Measured
 
-Every number here comes from a real run against the live TypeSafe API on a Linux host, with the
-shipped config and no key for the language model. `cargo test`: **49 passed**.
+Every number here comes from a real run on a Linux host against the live APIs, with the shipped
+config. `cargo test`: **51 passed**.
+
+Full action coverage, against TypeSafe:
 
 | Said | Decided | Latency |
 | --- | --- | --- |
-| "open spotify" | `app_open spotify` | 397 ms |
-| "turn spotify down" | `spotify_volume_down` | 642 ms |
-| "open spotify and pause the music" | `app_open` + `media_pause` | 417 ms |
-| "set a timer for 5 minutes" | `timer_set` | 456 ms |
+| "open spotify" | `app_open spotify` | 346 ms |
+| "turn spotify down" | `spotify_volume_down` | 306 ms |
+| "open spotify and pause the music" | `app_open` + `media_pause` | 296 ms |
+| "set a timer for 5 minutes" | `timer_set` | 343 ms |
 | "how long is left?" | `timer_check` | 251 ms |
 | "mute" | `volume_mute` | 290 ms |
 | "what year was Hamlet written" | language model | 296 ms |
@@ -161,9 +163,29 @@ working: naming the subject settles it even when the scope question is unsure. "
 is answered as a timer command rather than a question, which is why the timer target is resolved
 before the category.
 
+### Two decision vendors, same sentences
+
+The same four sentences through the same binary, changing only `[intent]`. Both vendors produced
+**identical decisions** on all four; the on-screen text differs only because the reply table picks
+at random.
+
+| Said | TypeSafe `jev-latest` | Perplexity `pplx-decider-v1.1-27b` |
+| --- | --- | --- |
+| "open spotify" | 346 ms | 1096 ms |
+| "turn spotify down" | 306 ms | 607 ms |
+| "open spotify and pause the music" | 296 ms | 867 ms |
+| "set a timer for 5 minutes" | 343 ms | 708 ms |
+
+So the trade is roughly 2–3x the latency against half the price ($0.02/M input against $0.042/M).
+Decisions agreeing is the useful part: it means the provider is swappable on this workload rather
+than being a rewrite, and the comparison cost one config change to run.
+
 With no key for the language model the question is answered with the configured "I can't answer
 that one yet" line, and the real reason goes to stderr — a model that is unreachable is not a
 reason to stop listening.
+
+The estimate in the log stays at zero rather than guessing: the providers' token counts are not
+surfaced back through the provider traits yet, so there is nothing honest to multiply the price by.
 
 ## Building and testing
 
