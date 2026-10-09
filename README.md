@@ -70,15 +70,26 @@ silently does nothing.
 
 The intent provider and the language model are separate settings, because they are separate jobs.
 
-`[intent] provider` is either:
+`[intent] provider` is one of:
 
 - `typesafe` — TypeSafe's System One endpoint returns calibrated probabilities directly. This is
   what the config ships with, and what the numbers below were measured against.
+- `decider` — Perplexity's Decisions API. A **different vendor's answer to the same problem**:
+  `pplx-decider-v1.1-27b` also returns probabilities instead of text, over the same
+  `noul`/`choice`/`score` primitives. It speaks the same wire protocol as System One, so switching
+  is the endpoint, the model name and the key — nothing else. `perplexity` is accepted as a
+  spelling of `decider`. It is roughly half the price per input token ($0.02/M against $0.042/M)
+  and caps at 128 questions per request and 10 requests per second.
 - `openai_compatible` — any `/chat/completions` endpoint: OpenRouter, OpenAI, a local LM Studio or
   Ollama, or your own gateway. The model is asked for the same probability distribution and its
   answer is **verified**: a choice must be one of the options offered, the probabilities must sum
   to 1, and every option must appear. A fabricated distribution is rejected rather than acted on,
   because the code downstream of it launches applications.
+
+The first two are decision models and the third is not, which is the distinction that matters:
+a decision model's numbers are calibrated by training, a chat model's are a claim that has to be
+checked. Running either is a config change, so they can be measured against each other on the
+same sentences.
 
 `[llm]` takes the same `openai_compatible` shape, so pointing it at a different service is three
 lines.
@@ -87,7 +98,7 @@ lines.
 
 | Job | Implementations |
 | --- | --- |
-| Intent | `typesafe`, `openai_compatible` |
+| Intent | `typesafe` (TypeSafe System One), `decider` (Perplexity Decisions), `openai_compatible` |
 | Language model | `openai_compatible` |
 | Speech | `fish`, `openai_compatible` (`/audio/speech`), `command` (any local synthesizer), `none` |
 | Transcription | `openai_compatible`, `command` (whisper.cpp and friends, keeps audio local), `none` |

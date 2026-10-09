@@ -1,9 +1,14 @@
 //! Intent providers: what does this sentence mean?
 //!
-//! Two implementations. `typesafe` calls TypeSafe's System One evaluation endpoint, which
-//! returns calibrated probabilities directly. `openai_compatible` asks any chat model for the
-//! same shape and then *verifies* it, because a chat model will happily return a probability
-//! distribution over options that do not exist, or one that does not sum to 1.
+//! A decision model answers with probabilities instead of text, and two vendors speak that
+//! protocol: TypeSafe's System One (`/v1/systemone`) and Perplexity's Decisions API
+//! (`/v1/decisions`, model `pplx-decider-v1.1-27b`). The request and response shapes are the
+//! same, so one implementation serves both and the differences are config: the endpoint, the
+//! model name and the key.
+//!
+//! The third implementation, `openai_compatible`, asks any chat model for the same shape and
+//! then *verifies* it, because a chat model will happily return a probability distribution over
+//! options that do not exist, or one that does not sum to 1.
 //!
 //! The verification is the point. A fabricated distribution that passes through unchecked is
 //! indistinguishable, downstream, from a calibrated one — and it is the downstream code that
@@ -94,29 +99,38 @@ pub fn questions_payload(
     Value::Object(out)
 }
 
-// --------------------------------------------------------------------------- TypeSafe
+// --------------------------------------------------------------------------- decisions
+//
+// One implementation, two vendors. TypeSafe's System One and Perplexity's Decisions API speak
+// the same protocol: send `state` and named typed questions, get probabilities back instead of
+// text. Everything that differs between them is the endpoint, the model name and the key, which
+// are config. Perplexity requires the model on every request and rejects an unknown one, which
+// is why the model is validated at startup rather than discovered from a 400.
 
-pub struct TypeSafeIntent {
+pub struct Decisions {
     client: reqwest::blocking::Client,
     url: String,
     key: String,
     model: String,
+    /// Which vendor this instance is, for `name()` and error messages: "typesafe" or "decider".
+    label: String,
 }
 
-impl TypeSafeIntent {
+impl Decisions {
     pub fn new(
         client: reqwest::blocking::Client,
         url: String,
         key: String,
         model: String,
+        label: impl Into<String>,
     ) -> Self {
-        Self { client, url, key, model }
+        Self { client, url, key, model, label: label.into() }
     }
 }
 
-impl IntentProvider for TypeSafeIntent {
+impl IntentProvider for Decisions {
     fn name(&self) -> String {
-        format!("typesafe:{}", self.model)
+        format!("{}:{}", self.label, self.model)
     }
 
     fn evaluate(
@@ -125,37 +139,99 @@ impl IntentProvider for TypeSafeIntent {
         questions: &BTreeMap<String, Question>,
         apps: &AppList,
     ) -> Result<Answers> {
-        // TypeSafe needs the "nothing here" option name too; it is read back off the questions
-        // that ask for it, so the provider does not need its own copy of the config.
+        // The "nothing here" option name is read back off the questions that ask for it, so the
+        // provider does not need its own copy of the config.
         let none_option = "none";
+        // Rebuilt per attempt because a request builder is consumed when it is sent, and a 429
+        // has to be retried rather than surfaced.
         let body = json!({
             "model": self.model,
             "state": state,
             "questions": questions_payload(questions, apps, none_option),
         });
-        let request = self.client.post(&self.url).json(&body);
-        let response = with_auth(request, &Some(self.key.clone()))
-            .send()
-            .context("calling TypeSafe")?;
-        let response = check_status(response, "TypeSafe")?;
-        let payload: Value = response.json().context("decoding TypeSafe's reply")?;
-        let answers = payload
-            .get("answers")
-            .and_then(Value::as_object)
-            .context("TypeSafe's reply had no `answers` object")?;
-        parse_typesafe_answers(answers)
+
+        for attempt in 0..=1 {
+            let request = self.client.post(&self.url).json(&body);
+            let response = with_auth(request, &Some(self.key.clone()))
+                .send()
+                .with_context(|| format!("calling the {} decisions provider", self.label))?;
+            let request_id = header(&response, "x-request-id");
+
+            // A 429 is a rate limit, not a failure: wait what the service asked for and try
+            // once more. Retrying more than once would just spend the wait twice.
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt == 0 {
+                let wait = header(&response, "retry-after")
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+                    .unwrap_or(2)
+                    .min(30);
+                eprintln!("  {} is rate limiting; waiting {wait}s", self.label);
+                std::thread::sleep(std::time::Duration::from_secs(wait));
+                continue;
+            }
+
+            let response = check_status(response, &format!("the {} decisions provider", self.label))
+                .map_err(|error| match &request_id {
+                    // The id is the only handle the vendor can trace a bad request with, and it
+                    // is absent on exactly the failures that have no body to read.
+                    Some(id) => anyhow::anyhow!("{error} (x-request-id: {id})"),
+                    None => error,
+                })?;
+            let payload: Value = response.json().with_context(|| {
+                format!("decoding the {} reply{}", self.label, suffix(&request_id))
+            })?;
+            let answers = payload
+                .get("answers")
+                .and_then(Value::as_object)
+                .with_context(|| format!("the {} reply had no `answers` object", self.label))?;
+            return parse_answers(answers);
+        }
+        anyhow::bail!("the {} decisions provider kept rate limiting", self.label)
     }
 }
 
-fn parse_typesafe_answers(answers: &Map<String, Value>) -> Result<Answers> {
+/// Read a response header as a string, if it is there and printable.
+fn header(response: &reqwest::blocking::Response, name: &str) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+fn suffix(request_id: &Option<String>) -> String {
+    match request_id {
+        Some(id) => format!(" (x-request-id: {id})"),
+        None => String::new(),
+    }
+}
+
+/// Read the answer set both vendors return.
+///
+/// The kind is taken from `type`, and falls back to whichever field is present, because a
+/// missing `type` would otherwise turn a score into a choice and the level would be read out of
+/// the wrong place.
+fn parse_answers(answers: &Map<String, Value>) -> Result<Answers> {
     let mut out = BTreeMap::new();
     for (id, answer) in answers {
-        let kind = answer.get("type").and_then(Value::as_str).unwrap_or("choice");
-        let parsed = match kind {
+        let kind = answer
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                if answer.get("noul").is_some() {
+                    "noul".to_string()
+                } else if answer.get("score").is_some() {
+                    "score".to_string()
+                } else {
+                    "choice".to_string()
+                }
+            });
+        let parsed = match kind.as_str() {
             "noul" => Answer {
-                kind: kind.to_string(),
+                kind: kind.clone(),
                 noul: answer.get("noul").and_then(Value::as_f64),
-                // A noul's confidence is its distance from a coin flip, per the API.
+                // A noul has no separate confidence: how far it sits from a coin flip is how
+                // much the answer is worth.
                 confidence: answer
                     .get("noul")
                     .and_then(Value::as_f64)
@@ -164,7 +240,7 @@ fn parse_typesafe_answers(answers: &Map<String, Value>) -> Result<Answers> {
                 ..Default::default()
             },
             "score" => Answer {
-                kind: kind.to_string(),
+                kind: kind.clone(),
                 score: answer.get("score").and_then(Value::as_f64),
                 legend: parse_legend(answer.get("legend")),
                 confidence: answer.get("confidence").and_then(Value::as_f64).unwrap_or(0.0),
@@ -553,5 +629,70 @@ mod tests {
         let json = extract_json("Sure! ```json\n{\"answers\": {}}\n```").unwrap();
         assert!(json.get("answers").is_some());
         assert!(extract_json("no json here").is_none());
+    }
+
+    /// Perplexity's Decisions API answers in the same shape as TypeSafe's, so the same parser
+    /// must read it. The body below is the example response from Perplexity's documentation,
+    /// verbatim — including the score's legend and the choice's probabilities.
+    #[test]
+    fn a_perplexity_decisions_response_is_read_the_same_way() {
+        let body: Value = serde_json::from_str(
+            r#"{
+              "model": "pplx-decider-v1.1-27b",
+              "answers": {
+                "defect": {"type": "noul", "noul": 0.9424522889347015},
+                "sentiment": {
+                  "type": "choice", "choice": "mixed", "confidence": 0.9255246944002182,
+                  "probabilities": {
+                    "positive": 0.020649883775315993,
+                    "mixed": 0.9503497962668123,
+                    "negative": 0.02900031995787183
+                  }
+                },
+                "severity": {
+                  "type": "score", "score": 1.7838686319784252, "confidence": 0.7838686319784252,
+                  "legend": {"0": "Cosmetic", "1": "Inconvenient", "2": "Product unusable"},
+                  "probabilities": {
+                    "0": 0.008423954913615923,
+                    "1": 0.199283458194343,
+                    "2": 0.7922925868920411
+                  }
+                }
+              },
+              "usage": {"input_tokens": 367, "output_tokens": 3}
+            }"#,
+        )
+        .unwrap();
+        let answers = parse_answers(body["answers"].as_object().unwrap()).unwrap();
+
+        let (defect, defect_confidence) = answers.noul("defect");
+        assert!(defect);
+        assert!((defect_confidence - 0.9424522889347015).abs() < 1e-9);
+
+        let (sentiment, sentiment_confidence) = answers.choice("sentiment");
+        assert_eq!(sentiment.as_deref(), Some("mixed"));
+        assert!((sentiment_confidence - 0.9255246944002182).abs() < 1e-9);
+
+        // 1.78 sits between "Inconvenient" (1) and "Product unusable" (2), and rounds to 2.
+        let (severity, _) = answers.score("severity");
+        assert_eq!(severity.as_deref(), Some("Product unusable"));
+    }
+
+    /// A reply without `type` must still be read as the right kind: a score read as a choice
+    /// would take its level from the wrong field entirely, and silently.
+    #[test]
+    fn an_answer_without_a_type_is_read_from_the_fields_it_has() {
+        let body: Value = serde_json::from_str(
+            r#"{
+              "defect": {"noul": 0.8},
+              "severity": {"score": 1.0, "legend": {"0": "low", "1": "high"}},
+              "sentiment": {"choice": "mixed"}
+            }"#,
+        )
+        .unwrap();
+        let answers = parse_answers(body.as_object().unwrap()).unwrap();
+        assert!(answers.noul("defect").0);
+        assert_eq!(answers.score("severity").0.as_deref(), Some("high"));
+        assert_eq!(answers.choice("sentiment").0.as_deref(), Some("mixed"));
     }
 }

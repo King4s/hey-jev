@@ -21,7 +21,7 @@ use crate::config::{Config, Question};
 use crate::intent::Answers;
 use crate::secrets::Secrets;
 
-pub use intent::{OpenAiCompatibleIntent, TypeSafeIntent};
+pub use intent::{Decisions, OpenAiCompatibleIntent};
 pub use llm::OpenAiCompatibleLlm;
 pub use stt::{CommandStt, OpenAiCompatibleStt};
 pub use tts::{CommandTts, FishTts, SilentTts, SpeechTts};
@@ -69,19 +69,25 @@ pub fn http_client(timeout_secs: u64) -> Result<reqwest::blocking::Client> {
 }
 
 /// Build the intent provider named in `[intent] provider`.
+///
+/// `typesafe` and `decider` are the same implementation: the two vendors speak the same
+/// decisions protocol, and only the endpoint, the model and the key differ. `perplexity` is
+/// accepted as a spelling of `decider` because that is the company's name.
 pub fn build_intent(config: &Config, secrets: &mut Secrets) -> Result<Box<dyn IntentProvider>> {
     let client = http_client(config.general.timeout_secs)?;
     let mut key = || secrets_maybe(secrets, &config.intent.key_env);
     match config.intent.provider.as_str() {
-        "typesafe" => {
-            let key = secrets
-                .get(&config.intent.key_env)
-                .with_context(|| format!("intent.provider = typesafe needs a value for {}", config.intent.key_env))?;
-            Ok(Box::new(TypeSafeIntent::new(
+        "typesafe" | "decider" | "perplexity" => {
+            let label = if config.intent.provider == "typesafe" { "typesafe" } else { "decider" };
+            let key = secrets.get(&config.intent.key_env).with_context(|| {
+                format!("intent.provider = {} needs a value for {}", config.intent.provider, config.intent.key_env)
+            })?;
+            Ok(Box::new(Decisions::new(
                 client,
                 config.intent.base_url.clone(),
                 key,
                 config.intent.model.clone(),
+                label,
             )))
         }
         "openai_compatible" => Ok(Box::new(OpenAiCompatibleIntent::new(
@@ -91,7 +97,7 @@ pub fn build_intent(config: &Config, secrets: &mut Secrets) -> Result<Box<dyn In
             config.intent.model.clone(),
         ))),
         other => bail!(
-            "unknown intent.provider `{other}` — known providers: typesafe, openai_compatible"
+            "unknown intent.provider `{other}` — known providers: typesafe, decider, openai_compatible"
         ),
     }
 }

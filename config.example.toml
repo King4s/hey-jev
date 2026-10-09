@@ -40,10 +40,28 @@ max = 100
 
 # --------------------------------------------------------------------------- intent
 #
-# The intent provider turns one sentence into typed answers. "typesafe" calls TypeSafe's System
-# One endpoint, which returns calibrated probabilities. "openai_compatible" asks any chat model
-# for the same shape and verifies it — it works with OpenRouter, OpenAI, a local LM Studio, or
-# the fleet's own gateway, because they all speak /chat/completions.
+# The intent provider turns one sentence into typed answers. Three names, two protocols:
+#
+#   "typesafe"  TypeSafe System One     https://api.typesafe.ai/v1/systemone   model jev-latest
+#   "decider"   Perplexity Decisions    https://api.perplexity.ai/v1/decisions model pplx-decider-v1.1-27b
+#   "openai_compatible"  any /chat/completions model, whose answer is verified before it is used
+#
+# The first two are the same protocol — a decision model answers with probabilities instead of
+# text — so switching between them is the three lines below and nothing else. "perplexity" is
+# accepted as a spelling of "decider".
+#
+# To use Decider instead of Jev, replace this section with:
+#
+#   [intent]
+#   provider = "decider"
+#   model = "pplx-decider-v1.1-27b"
+#   base_url = "https://api.perplexity.ai/v1/decisions"
+#   key_env = "PERPLEXITY_API_KEY"
+#   input_price_per_million = 0.02
+#
+# Notes that matter: the model is required and an unknown one is a 400; the key must go in
+# Authorization (x-api-key is not read, and returns 401); the path takes no trailing slash; and
+# Perplexity answers about 2x cheaper per input token than Jev ($0.02/M against $0.042/M).
 
 [intent]
 provider = "typesafe"

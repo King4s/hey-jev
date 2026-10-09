@@ -565,6 +565,12 @@ impl Config {
         if self.intent.questions.is_empty() {
             bail!("intent.questions is empty: the assistant has nothing to ask");
         }
+        // Both decision vendors answer 400 on a missing model, and Perplexity also on an
+        // unknown one. Catching it here means a config mistake is a startup error rather than a
+        // failure the first time someone speaks.
+        if self.intent.model.trim().is_empty() {
+            bail!("intent.model is empty: every intent provider needs a model");
+        }
         for (field, id) in [
             ("compound_question", &self.intent.compound_question),
             ("category_question", &self.intent.category_question),
